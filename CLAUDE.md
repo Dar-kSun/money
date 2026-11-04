@@ -8,22 +8,45 @@ The end goal is a portfolio of submitted alphas clearing **Sharpe > 1.25** and
 
 ## Status: the harness exists — extend it, don't rebuild it
 
-The `wqb` package already implements authentication, generation, simulation,
-grading, persistence and the submission workflow. Read the relevant module
-before writing new code; most tasks are a change inside one of these, not a new
-script.
+The `wqb` package already implements authentication, generation, local
+simulation, search, grading, persistence and the submission workflow. Read the
+relevant module before writing new code; most tasks are a change inside one of
+these, not a new script.
+
+**Read [`STRATEGY.md`](STRATEGY.md) first.** It explains why the pipeline is
+shaped the way it is — in particular why correlation, not expression volume,
+is the binding constraint, and why the search runs locally before it touches
+Brain.
+
+**Remote side** (spends Brain quota):
 
 | Module | Role |
 | --- | --- |
 | `wqb/config.py` | Credentials, the fixed simulation settings block, run knobs |
 | `wqb/client.py` | `BrainClient`: auth, token renewal, backoff, pagination |
-| `wqb/generate.py` | Mean-reversion templates and the expression grid |
 | `wqb/simulate.py` | Submit one simulation, poll it to an in-sample verdict |
 | `wqb/evaluate.py` | The Sharpe/Fitness gate plus Brain's own IS checks |
 | `wqb/runner.py` | The concurrent, resumable discovery loop |
 | `wqb/store.py` | Thread-safe SQLite results store and JSONL success log |
 | `wqb/submit.py` | Pre-submission checks and the gated OS submission |
-| `wqb/cli.py` | `python -m wqb` subcommands |
+
+**Local side** (free and unlimited — do the work here first):
+
+| Module | Role |
+| --- | --- |
+| `wqb/local/panel.py` | Aligned (dates x instruments) data, with a per-day universe |
+| `wqb/local/operators.py` | FastExpr operator implementations over numpy |
+| `wqb/local/evaluator.py` | Sandboxed expression parsing and evaluation |
+| `wqb/local/engine.py` | Positions and Brain-shaped metrics; `correlation()` |
+| `wqb/local/data.py` | Synthetic panels, CSV loading, fundamental merge |
+| `wqb/local/fetch.py` | Free data: Stooq prices, SEC EDGAR fundamentals |
+| `wqb/search/mutate.py` | Structural edits to an expression via its syntax tree |
+| `wqb/search/evolve.py` | Population search scored on fitness x novelty |
+| `wqb/fields.py` | Field class, direction prior, and crowding rank |
+| `wqb/diversity.py` | Family/skeleton signatures as a correlation proxy |
+| `wqb/generate.py` | Direction-aware templates and the expression grid |
+| `wqb/propose.py` | Claude proposes mechanisms; output is validated |
+| `wqb/cli.py`, `wqb/localcli.py` | `python -m wqb` subcommands |
 
 **All HTTP goes through `BrainClient`.** It already handles re-auth on an
 expired token, `Retry-After`, and 429/5xx backoff. Do not create a bare
@@ -67,6 +90,32 @@ python -m wqb results --top 20
 python -m wqb submit --all          # checks only; --yes to actually submit
 ```
 
+### The local pipeline — free, no credentials, no quota
+
+```bash
+python -m wqb fetch prices --dest data/prices
+```
+
+```bash
+python -m wqb fetch fundamentals --symbols-from data/prices --dest data/fundamentals --contact you@example.com
+```
+
+```bash
+python -m wqb screen --data data/prices --top 25
+```
+
+```bash
+python -m wqb search --data data/prices --fundamentals data/fundamentals --generations 20
+```
+
+```bash
+python -m wqb calibrate --data data/prices 'rank(-1 * ts_zscore(close, 20))'
+```
+
+Add `--synthetic` to any of these to run on generated data without downloading
+anything; the results are not alphas and the command says so. See
+[`docs/data-sources.md`](docs/data-sources.md).
+
 ## Domain knowledge (the part that is expensive to rediscover)
 
 Target environment: **USA / D1 (1-day delay) / TOP3000**.
@@ -81,6 +130,16 @@ close / ts_mean(close, 20) - 1
 It fails because it buys price spikes in a market that mean-reverts. Do not
 propose variations of it; `generate.looks_like_naive_momentum()` exists to catch
 this shape, and `wqb simulate` warns when a hand-written expression matches it.
+
+**This lesson is specific to price.** Short-horizon reversal dominates liquid
+equities at D1, but slow data does the opposite: post-earnings-announcement
+drift and analyst-revision momentum are well documented. So the *same algebra*
+is a failure mode on `close` and a legitimate signal on `anl_eps_revision`.
+`wqb/fields.py` assigns each field a class and a direction prior, and templates
+declare which classes they apply to — price and volume draw only reversion,
+fundamental and analyst only drift, and the uncertain classes draw both. An
+earlier version forced reversion everywhere and had a test enforcing it, which
+ruled out the least-crowded region of the search space. Do not reinstate that.
 
 The working blueprint:
 
@@ -131,9 +190,31 @@ truncation: 0.05
 * **Resume is quota protection.** Every attempt is recorded, and a re-run skips
   expressions already simulated. Avoid `--no-resume` unless re-simulation is the
   point.
-* **Tests never hit the network.** They use `responses` for HTTP and the
-  `no_sleep` fixture to make backoff instant. Keep it that way so the suite stays
-  fast and runnable without credentials.
+* **Tests never hit the network.** They use `responses` for HTTP, injected fake
+  clients for the proposer, and the `no_sleep` fixture to make backoff instant.
+  Keep it that way so the suite stays fast and runnable without credentials.
+* **Screen locally before spending quota.** A Brain simulation is the scarce
+  resource. Anything that can be decided from `wqb/local` should be, and new
+  search ideas belong on the local side first.
+* **Correlation is an objective, not a final check.** The search scores
+  candidates on local fitness *discounted by* correlation with what it has
+  already found, because ten correlated alphas are one submission. Do not
+  "simplify" that back to plain fitness maximisation.
+* **The expression evaluator is a sandbox.** Expressions arrive from config
+  files and from a language model, so `wqb/local/evaluator.py` walks only the
+  AST node types an alpha needs and never evals text. Do not add attribute
+  access, subscripting, or a general `eval` fast path.
+* **Anything a model returns is untrusted.** `wqb/propose.py` validates,
+  field-checks, locally evaluates and de-duplicates every proposal before it
+  can reach the API.
+* **Fundamentals key off the filing date.** The period end is weeks before the
+  number is public; aligning on it leaks information nobody could trade on.
+* **Local metrics are uncalibrated.** They are for *ranking*. `returns` is a
+  genuine unknown between two definitions and it feeds fitness — see
+  `wqb/local/engine.py` and the `calibrate` command.
+* **`rank()` is non-negative, so `neutralization="NONE"` gives a long-only
+  book** that scores a positive Sharpe on pure noise. There is a test naming
+  this; do not screen with `NONE` and read the drift as skill.
 
 ## Known gap: the live API contract is unverified
 
@@ -186,18 +267,20 @@ operator" error, that is the cause, not a syntax bug.
 
 ## Suggested next steps
 
-1. **Validate against the live API** (above) and correct any contract mismatch.
-2. **One full baseline run** over price/volume fields, then read
-   `python -m wqb results --top 20` to see which templates and windows actually
-   score, rather than widening the search blindly.
-3. **Expand into fundamental datasets** — the price/volume grid is heavily
-   crowded, and self-correlation with existing alphas is the most common
-   submission blocker.
-4. **Handle correlation explicitly.** Brain rejects alphas correlated with the
-   user's existing submissions. Worth recording the failed check names from
-   `submit` into the store so the search can learn to avoid that region.
-5. **Only then consider auto-submission** of pre-check-passing alphas, keeping
-   the explicit opt-in.
+1. **Calibrate the local simulator.** Run ~20 expressions through
+   `python -m wqb calibrate` and the same ones through `python -m wqb simulate`,
+   and check that local Sharpe *rank-correlates* with Brain's. Everything
+   downstream rests on this, and it also settles the `returns` definition. If
+   the ranks do not correlate, fix that before building anything else.
+2. **Validate the live API contract** (below) while doing it.
+3. **Fetch fundamentals and search there.** Price/volume is the most mined
+   region of the platform; fundamental and analyst fields are where
+   uncorrelated alphas remain.
+4. **Record Brain's failed check names into the store**, so the search can
+   learn which regions get refused for correlation rather than rediscovering
+   them.
+5. **Then add `propose` to the loop**, so a model's suggestions are judged by a
+   screen already shown to work.
 
 ## Caveats worth keeping in mind
 

@@ -1,11 +1,41 @@
 # money — WorldQuant Brain alpha automation
 
-A CLI that authenticates against the Brain API, generates mean-reversion alphas
-for **USA / D1 / TOP3000**, simulates them, grades them on **Sharpe > 1.25** and
-**Fitness >= 1.0**, and runs the out-of-sample submission checks.
+A CLI that discovers alpha expressions for **USA / D1 / TOP3000**, grades them
+on **Sharpe > 1.25** and **Fitness >= 1.0**, and runs the out-of-sample
+submission checks.
 
-[`CLAUDE.md`](CLAUDE.md) holds the strategy context, conventions and open
-questions — read it before changing how alphas are generated or graded.
+It has two halves. A **local** half that screens thousands of candidates for
+free, and a **remote** half that spends Brain's limited simulation quota only
+on the survivors.
+
+- [`STRATEGY.md`](STRATEGY.md) — why the pipeline is shaped this way, and the
+  answer to "LLMs or train our own?"
+- [`CLAUDE.md`](CLAUDE.md) — working conventions and open questions.
+- [`docs/data-sources.md`](docs/data-sources.md) — getting free data.
+
+## Quick start
+
+```bash
+pip install -r requirements-dev.txt
+```
+
+```bash
+python -m wqb screen --synthetic --top 10
+```
+
+That runs the whole local pipeline on generated data, with no credentials and
+no downloads, to check the install. Then fetch real data:
+
+```bash
+python -m wqb fetch prices --dest data/prices
+```
+
+```bash
+python -m wqb search --data data/prices
+```
+
+Both are free. Only `auth`, `simulate`, `run`, `fields` and `submit` talk to
+Brain.
 
 ## Install
 
@@ -121,15 +151,19 @@ simulated, so an interrupted run resumes without spending quota twice; use
 
 | File | Role |
 | --- | --- |
-| `wqb/config.py` | Credentials, the Phase 3 settings block, run knobs |
-| `wqb/client.py` | Authenticated session, re-auth, `Retry-After` backoff, pagination |
-| `wqb/generate.py` | Mean-reversion templates and the expression grid |
+| `wqb/local/` | The free simulator: panel, operators, evaluator, metrics, data |
+| `wqb/search/` | Expression mutation and population search |
+| `wqb/fields.py` | Field class, direction prior, crowding rank |
+| `wqb/diversity.py` | Family signatures, used as a correlation proxy |
+| `wqb/generate.py` | Direction-aware templates and the expression grid |
+| `wqb/propose.py` | Claude proposes mechanisms; every output is validated |
+| `wqb/client.py` | Authenticated Brain session, re-auth, backoff, pagination |
 | `wqb/simulate.py` | Submit a simulation and poll it to an IS verdict |
 | `wqb/evaluate.py` | The Sharpe/Fitness gate plus Brain's own IS checks |
-| `wqb/runner.py` | The Phase 4 loop, concurrent and resumable |
+| `wqb/runner.py` | The concurrent, resumable remote loop |
 | `wqb/store.py` | Thread-safe SQLite results store and success log |
 | `wqb/submit.py` | Pre-submission checks and the gated OS submission |
-| `wqb/cli.py` | Argument parsing and the subcommands |
+| `wqb/cli.py`, `wqb/localcli.py` | The subcommands |
 
 ## Tests
 
@@ -137,11 +171,22 @@ simulated, so an interrupted run resumes without spending quota twice; use
 python -m pytest
 ```
 
-55 tests cover the API contract against mocked HTTP: the 201 auth handshake,
-biometric-required detection, re-auth on an expired token, 429/5xx backoff,
-`Retry-After` polling, the exact Phase 3 payload, both threshold boundaries
-(Sharpe is strict, Fitness is inclusive), concurrent store writes, and the
-guarantee that a dry-run submission never POSTs.
+265 tests, none of which touch the network. They cover the API contract
+against mocked HTTP (auth handshake, token renewal, backoff, `Retry-After`
+polling, the exact simulation payload), both threshold boundaries, concurrent
+store writes, and the guarantee that a dry-run submission never POSTs.
+
+The local simulator is verified against synthetic panels with known answers,
+because real data cannot tell you whether a backtester has a sign flip or an
+off-by-one that leaks the future:
+
+* A signal planted to pay off at one delay earns a Sharpe above 20 at exactly
+  that delay and under 2 at every other one, in both directions.
+* Under AR(1) returns the profitable side flips with the delay (a delay-1 alpha
+  can only capture phi-squared), and the engine reproduces that.
+* On a random walk nothing scores — the look-ahead guard.
+* The search finds a planted signal it was not seeded with, and returns an
+  empty book when run on unpredictable data.
 
 ## Notes
 
