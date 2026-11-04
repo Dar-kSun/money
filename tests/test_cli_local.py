@@ -97,3 +97,58 @@ def test_fetch_reports_a_blocked_host_without_tracebacking(monkeypatch, capsys):
     monkeypatch.setattr("wqb.local.fetch.fetch_stooq_bulk", fake_bulk)
     assert run(["fetch", "prices", "--dest", "x"]) == 1
     assert "Fetch failed" in capsys.readouterr().err
+
+
+# ------------------------------------------- local screen as a quota pre-filter
+def test_screen_locally_keeps_only_the_best(monkeypatch):
+    """A Brain simulation is the scarce resource, so the screen must cut the
+    grid down before run_batch sees it."""
+    from wqb.cli import build_parser, screen_locally
+    from wqb.generate import generate
+
+    args = build_parser().parse_args(
+        ["run", "--screen", "--synthetic", "--screen-top", "3",
+         "--universe", "40", "--warmup", "80"]
+    )
+    candidates = list(generate(["close"], [20]))
+    assert len(candidates) > 3
+
+    kept = screen_locally(args, candidates)
+    assert len(kept) == 3
+    assert {c.expression for c in kept} <= {c.expression for c in candidates}
+
+
+def test_screen_locally_drops_out_of_band_turnover(monkeypatch):
+    """Turnover outside Brain's band is refused on sight, so it must not cost
+    a simulation."""
+    from wqb.cli import build_parser, screen_locally
+    from wqb.generate import generate
+    from wqb.local.engine import Metrics
+
+    args = build_parser().parse_args(
+        ["run", "--screen", "--synthetic", "--universe", "40", "--warmup", "80"]
+    )
+
+    def all_churning(expression, panel, config, **kwargs):
+        return Metrics(sharpe=9.0, fitness=9.0, turnover=0.95, returns=1.0,
+                       drawdown=0.0, margin=0.0, long_count=1, short_count=1,
+                       days=10)
+
+    monkeypatch.setattr("wqb.local.engine.simulate", all_churning)
+    assert screen_locally(args, list(generate(["close"], [20]))) == []
+
+
+def test_run_spends_no_quota_when_the_screen_empties_the_grid(monkeypatch, capsys):
+    from wqb import cli
+
+    monkeypatch.setattr(cli, "screen_locally", lambda args, candidates: [])
+    called = []
+    monkeypatch.setattr(cli, "run_batch",
+                        lambda *a, **k: called.append(1))
+
+    args = cli.build_parser().parse_args(
+        ["run", "--screen", "--synthetic", "--universe", "40", "--warmup", "80"]
+    )
+    assert cli.cmd_run(args, client=None, store=None) == 0
+    assert not called, "run_batch must not be reached"
+    assert "no quota spent" in capsys.readouterr().out

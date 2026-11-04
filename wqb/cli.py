@@ -81,6 +81,23 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--min-fitness", type=float, default=None)
     p_run.add_argument("--no-resume", action="store_true", help="re-simulate seen expressions")
     p_run.add_argument("--dry-run", action="store_true", help="print the grid, simulate nothing")
+    # Pre-screen locally so quota goes only to candidates that already look good.
+    p_run.add_argument("--screen", action="store_true",
+                       help="score candidates locally first and simulate only the best")
+    p_run.add_argument("--screen-top", type=int, default=20,
+                       help="how many of the locally best candidates to simulate")
+    p_run.add_argument("--data", default="data/prices",
+                       help="price data for --screen")
+    p_run.add_argument("--fundamentals", default=None)
+    p_run.add_argument("--synthetic", action="store_true",
+                       help="screen against generated data (for trying it out)")
+    p_run.add_argument("--min-history", type=int, default=300)
+    p_run.add_argument("--max-symbols", type=int, default=500,
+                       help="panel width for screening; a subsample ranks "
+                            "candidates far faster than the full universe")
+    p_run.add_argument("--warmup", type=int, default=250)
+    p_run.add_argument("--returns-basis", default="half_book",
+                       choices=("half_book", "book"))
 
     p_res = sub.add_parser("results", help="show stored results")
     p_res.add_argument("--top", type=int, default=20)
@@ -232,6 +249,64 @@ def cmd_run_dry(args: argparse.Namespace) -> int:
     return 0
 
 
+def screen_locally(args: argparse.Namespace, candidates: list[Candidate]) -> list[Candidate]:
+    """Rank candidates with the local simulator and keep the best few.
+
+    A Brain simulation is the scarce resource, so spending it on a candidate
+    that already looks poor locally is waste. Screening is free, so this
+    strictly dominates simulating the grid in order -- provided the local
+    screen ranks the way Brain does, which `wqb calibrate` is for.
+    """
+    import argparse as _argparse
+    import re as _re
+
+    from .localcli import load_panel, sim_config
+    from .local.engine import simulate as local_simulate
+    from .local.evaluator import ExpressionError
+
+    # The remote `--universe` is a Brain universe NAME ("TOP3000"); the local
+    # panel needs an instrument count. Derive one from the name so the screen
+    # targets the same universe, bounded by the panel actually loaded.
+    digits = _re.sub(r"\D", "", str(args.universe)) or "3000"
+    width = int(digits)
+    if args.max_symbols:
+        width = min(width, args.max_symbols)
+    local_args = _argparse.Namespace(**{**vars(args), "universe": width})
+
+    panel = load_panel(local_args)
+    config = sim_config(local_args)
+    print(
+        f"Screening {len(candidates)} candidate(s) locally over "
+        f"{panel.n_dates} days x {panel.n_instruments} instruments...",
+        flush=True,
+    )
+
+    scored: list[tuple[float, Candidate]] = []
+    skipped = 0
+    for candidate in candidates:
+        try:
+            metrics = local_simulate(candidate.expression, panel, config)
+        except ExpressionError:
+            skipped += 1
+            continue
+        # Reject locally hopeless turnover before it costs a simulation.
+        if not 0.01 <= metrics.turnover <= 0.70:
+            continue
+        scored.append((metrics.sharpe, candidate))
+
+    scored.sort(key=lambda row: row[0], reverse=True)
+    kept = [candidate for _, candidate in scored[: args.screen_top]]
+    print(
+        f"  {len(scored)} screened"
+        + (f", {skipped} unevaluable" if skipped else "")
+        + f"; simulating the top {len(kept)} on Brain"
+        + (f" (best local sharpe {scored[0][0]:.2f})" if scored else "")
+        + "\n",
+        flush=True,
+    )
+    return kept
+
+
 def cmd_run(args: argparse.Namespace, client: BrainClient, store: ResultStore) -> int:
     config = RunConfig(
         concurrency=args.concurrency,
@@ -243,8 +318,15 @@ def cmd_run(args: argparse.Namespace, client: BrainClient, store: ResultStore) -
     if args.min_fitness is not None:
         config.min_fitness = args.min_fitness
 
+    candidates = _candidates(args)
+    if args.screen:
+        candidates = screen_locally(args, candidates)
+        if not candidates:
+            print("Nothing survived the local screen; no quota spent.")
+            return 0
+
     report = run_batch(
-        client, _candidates(args), store, config, resume=not args.no_resume
+        client, candidates, store, config, resume=not args.no_resume
     )
     print(f"\n{report.line()}")
     if report.winners:
