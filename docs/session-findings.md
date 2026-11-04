@@ -103,10 +103,17 @@ on that optimisation is small.
    whichever lands closer to Brain's reported fitness and set
    `--returns-basis` from then on.
 3. **Verify the live Brain API contract.** No call has ever been made against
-   it from this environment — `api.worldquantbrain.com` is blocked by the
-   network policy here. The likely mismatch sites are the `is` summary keys in
-   `simulate._finalize`, the submission paths in `submit.py`, and the
-   `data-fields` query parameters.
+   it from this environment — `api.worldquantbrain.com` is denied at the
+   *network layer*: the proxy refuses CONNECT with a 403, so credentials
+   cannot help. The hosts have to be allowed in the environment's network
+   settings (session title bar → cloud environment menu → Edit → Network
+   access). `python -m wqb verify` now runs the whole contract check in one
+   pass and names which assumption broke. Likely mismatch sites: the `is`
+   summary keys in `simulate._finalize`, the submission paths in `submit.py`,
+   and the `data-fields` query parameters.
+
+   Hosts to allow: `api.worldquantbrain.com`, `static.stooq.com`,
+   `stooq.com`, `www.sec.gov`, `data.sec.gov`.
 4. **Re-rank screen finalists on the full panel.** The subsample result above
    says the ordering survives but the top of it is not reliable to within a
    place or two, so `run --screen` ideally re-scores its shortlist at full
