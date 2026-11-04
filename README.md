@@ -1,10 +1,11 @@
 # money — WorldQuant Brain alpha automation
 
-A CLI that implements the four phases in
-[`WorldQuant Brain CLI Setup & Context.md`](WorldQuant%20Brain%20CLI%20Setup%20%26%20Context.md):
-authenticate against the Brain API, generate mean-reversion alphas for
-**USA / D1 / TOP3000**, simulate them, grade them on **Sharpe > 1.25** and
-**Fitness >= 1.0**, and run the out-of-sample submission checks.
+A CLI that authenticates against the Brain API, generates mean-reversion alphas
+for **USA / D1 / TOP3000**, simulates them, grades them on **Sharpe > 1.25** and
+**Fitness >= 1.0**, and runs the out-of-sample submission checks.
+
+[`CLAUDE.md`](CLAUDE.md) holds the strategy context, conventions and open
+questions — read it before changing how alphas are generated or graded.
 
 ## Install
 
