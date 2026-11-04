@@ -127,3 +127,55 @@ def test_load_csv_panel_errors_when_nothing_has_enough_history(tmp_path):
     write_csv(tmp_path / "AAA.csv", ["2024-01-01"], [1.0])
     with pytest.raises(ValueError, match="at least"):
         load_csv_panel(tmp_path, min_history=300)
+
+
+# ------------------------------------------------------- fundamental merge
+def test_load_fundamentals_aligns_and_forward_fills(tmp_path):
+    """A quarterly figure stays current until the next filing, so it must be
+    carried forward across trading days rather than left as a single spike."""
+    import numpy as np
+    from wqb.local.data import load_fundamentals
+
+    panel = synthetic_panel(40, 2, seed=0)
+    panel.instruments[:] = ["AAA", "BBB"]
+    first = str(panel.dates.astype("datetime64[D]")[5])
+    (tmp_path / "AAA.csv").write_text(f"Date,Assets\n{first},100\n")
+
+    load_fundamentals(panel, tmp_path, lag_days=0)
+    assets = panel.get("assets")
+    assert np.isnan(assets[4, 0])          # nothing known before the filing
+    assert assets[5, 0] == 100.0
+    assert assets[20, 0] == 100.0          # carried forward
+    assert np.all(np.isnan(assets[:, 1]))  # BBB filed nothing
+
+
+def test_load_fundamentals_lags_the_filing_date(tmp_path):
+    import numpy as np
+    from wqb.local.data import load_fundamentals
+
+    panel = synthetic_panel(40, 1, seed=0)
+    panel.instruments[:] = ["AAA"]
+    day = str(panel.dates.astype("datetime64[D]")[5])
+    (tmp_path / "AAA.csv").write_text(f"Date,Assets\n{day},100\n")
+
+    load_fundamentals(panel, tmp_path, lag_days=3)
+    assert np.isnan(panel.get("assets")[5, 0])
+    assert panel.get("assets")[8, 0] == 100.0
+
+
+def test_load_fundamentals_ignores_unknown_symbols(tmp_path):
+    from wqb.local.data import load_fundamentals
+
+    panel = synthetic_panel(30, 1, seed=0)
+    panel.instruments[:] = ["AAA"]
+    (tmp_path / "ZZZ.csv").write_text("Date,Assets\n2018-01-05,100\n")
+    load_fundamentals(panel, tmp_path)
+    assert "assets" not in panel.fields
+
+
+def test_load_fundamentals_errors_on_empty_directory(tmp_path):
+    import pytest
+    from wqb.local.data import load_fundamentals
+    panel = synthetic_panel(10, 1, seed=0)
+    with pytest.raises(FileNotFoundError):
+        load_fundamentals(panel, tmp_path)

@@ -277,3 +277,70 @@ def add_universe(panel: Panel, size: int = 3000, by: str = "cap") -> Panel:
     """Restrict the panel to the ``size`` largest instruments by ``by``, per day."""
     panel.restrict_universe(panel.top_by(by, size))
     return panel
+
+
+def load_fundamentals(
+    panel: Panel,
+    directory: str | Path,
+    *,
+    pattern: str = "*.csv",
+    lag_days: int = 1,
+) -> Panel:
+    """Attach fundamental series from a directory of per-symbol CSVs.
+
+    Each file is ``Date,<Tag>,...`` with one row per filing date, as written
+    by :func:`wqb.local.fetch.fetch_sec_fundamentals`. Values are aligned onto
+    the panel's trading days and forward-filled, because a quarterly figure
+    stays current until the next filing.
+
+    ``lag_days`` shifts each value that many days later than its filing date.
+    The filing date is already the day the number became public, so one day is
+    a cushion against a filing landing after the close rather than a guess at
+    when it was knowable.
+    """
+    directory = Path(directory)
+    files = sorted(directory.glob(pattern))
+    if not files:
+        raise FileNotFoundError(f"no files matching {pattern!r} in {directory}")
+
+    column = {sym: i for i, sym in enumerate(panel.instruments)}
+    dates = panel.dates.astype("datetime64[D]")
+    tags: dict[str, np.ndarray] = {}
+
+    for path in files:
+        symbol = path.stem.upper()
+        index = column.get(symbol)
+        if index is None:
+            continue
+        with path.open(newline="", encoding="utf-8-sig") as fh:
+            reader = csv.DictReader(fh)
+            if not reader.fieldnames:
+                continue
+            date_key = reader.fieldnames[0]
+            for row in reader:
+                raw = str(row.get(date_key) or "")[:10]
+                if len(raw) != 10:
+                    continue
+                try:
+                    stamp = np.datetime64(raw, "D") + np.timedelta64(lag_days, "D")
+                except ValueError:
+                    continue
+                # First trading day on or after the (lagged) filing date.
+                position = int(np.searchsorted(dates, stamp, side="left"))
+                if position >= len(dates):
+                    continue
+                for tag, value in row.items():
+                    if tag == date_key or value in (None, ""):
+                        continue
+                    try:
+                        number = float(value)
+                    except (TypeError, ValueError):
+                        continue
+                    array = tags.setdefault(
+                        tag.lower(), np.full(panel.shape, np.nan)
+                    )
+                    array[position, index] = number
+
+    for name, array in tags.items():
+        panel.add_field(name, _forward_fill(array))
+    return panel

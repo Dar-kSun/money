@@ -20,6 +20,8 @@ from .generate import (
     looks_like_naive_momentum,
     resolve_templates,
 )
+from .localcli import HANDLERS as LOCAL_HANDLERS
+from .localcli import register as register_local
 from .runner import run_batch
 from .simulate import run_simulation
 from .store import ResultStore
@@ -91,6 +93,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--yes", action="store_true",
         help="actually submit. Without this flag only the checks are run.",
     )
+
+    # Local pipeline: these cost no Brain quota and need no credentials.
+    register_local(sub)
     return parser
 
 
@@ -108,6 +113,8 @@ def settings_from_args(args: argparse.Namespace) -> SimSettings:
 def main(argv: list[str] | None = None) -> int:
     load_dotenv()
     args = build_parser().parse_args(argv)
+    if getattr(args, "command", None) == "fetch" and not args.dest:
+        args.dest = f"data/{args.what}"
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(levelname)s %(name)s: %(message)s",
@@ -115,6 +122,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "templates":
         return cmd_templates(args)
+    if args.command in LOCAL_HANDLERS:
+        # Local commands run offline: no authentication, no quota.
+        try:
+            return LOCAL_HANDLERS[args.command](args)
+        except KeyboardInterrupt:
+            return 130
 
     store = ResultStore(args.db)
 
