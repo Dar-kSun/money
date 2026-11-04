@@ -185,7 +185,21 @@ def test_group_neutralize_ignores_unknown_group_code():
     assert np.isnan(out[0, 2])
 
 
-def test_shape_mismatch_is_reported_clearly(ctx):
-    """A cross-sectional operator and its universe must come from one panel."""
-    with pytest.raises(ValueError, match="same panel"):
-        op_rank(ctx, np.array([[1.0, 2.0, 3.0, 4.0]]))
+def test_a_single_row_is_broadcast_to_the_panel(ctx):
+    """A row that fits the instrument axis is broadcast across time, so a
+    search-generated expression mixing a constant row with a series works."""
+    out = op_rank(ctx, np.array([[3.0, 1.0, 2.0, 4.0]]))
+    assert out.shape == (T, N)
+    assert np.allclose(out[0], out[-1])
+
+
+def test_a_scalar_is_broadcast_to_the_panel(ctx):
+    """ts_delta(20, 5) is a thing crossover produces; a constant simply has no
+    time variation rather than crashing a reduction."""
+    assert np.allclose(op_ts_delta(ctx, 20.0, 2)[-1], 0.0)
+    assert np.allclose(op_ts_mean(ctx, 20.0, 2)[-1], 20.0)
+
+
+def test_an_incompatible_shape_is_reported_clearly(ctx):
+    with pytest.raises(ValueError, match="does not fit the panel"):
+        op_rank(ctx, np.ones((T + 3, N + 1)))

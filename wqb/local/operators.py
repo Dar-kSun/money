@@ -82,6 +82,45 @@ def _sliding(x: np.ndarray, d: int, fn: Callable[[np.ndarray], np.ndarray]) -> n
     return out
 
 
+def _as_series(ctx: Context, x, label: str = "argument") -> np.ndarray:
+    """Coerce an operand to a full (T, N) series.
+
+    Search-generated expressions can put a constant where a series belongs --
+    ``ts_delta(20, 5)`` is a legitimate thing for a crossover to produce. A
+    scalar is broadcast to the panel shape (a constant simply has no time
+    variation) rather than raising an IndexError deep inside a reduction.
+    """
+    arr = np.asarray(x, dtype=float)
+    if arr.ndim == 0:
+        return np.full(ctx.universe.shape, float(arr))
+    if arr.shape == ctx.universe.shape:
+        return arr
+    try:
+        return np.broadcast_to(arr, ctx.universe.shape).astype(float, copy=True)
+    except ValueError as exc:
+        raise ValueError(
+            f"{label} has shape {arr.shape}, which does not fit the panel "
+            f"{ctx.universe.shape}"
+        ) from exc
+
+
+def _row_reduce(x: np.ndarray, mask: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Per-day mean and population std over in-universe finite entries.
+
+    Written out instead of nanmean/nanstd so an all-NaN warm-up row does not
+    emit a RuntimeWarning on every one of thousands of evaluations.
+    """
+    values = np.where(mask, x, np.nan)
+    finite = np.isfinite(values)
+    count = finite.sum(axis=1, keepdims=True)
+    filled = np.where(finite, values, 0.0)
+    total = filled.sum(axis=1, keepdims=True)
+    mean = np.where(count > 0, total / np.maximum(count, 1), np.nan)
+    sq = np.where(finite, (values - mean) ** 2, 0.0).sum(axis=1, keepdims=True)
+    std = np.where(count > 0, np.sqrt(sq / np.maximum(count, 1)), np.nan)
+    return mean, std
+
+
 def _nan_to_nan(x: np.ndarray) -> np.ndarray:
     out = np.asarray(x, dtype=float)
     return np.where(np.isfinite(out), out, np.nan)
@@ -111,13 +150,13 @@ def _as_lag(value) -> int:
 
 
 # ------------------------------------------------------- cross-sectional
-def op_rank(ctx: Context, x: np.ndarray) -> np.ndarray:
+def op_rank(ctx: Context, x: np.ndarray) -> np.ndarray:  # noqa: D401
     """Rank across instruments per day, scaled to [0, 1].
 
     This is what makes an alpha market neutral: it replaces raw magnitudes
     with a uniform spread across the universe.
     """
-    values = _masked(x, ctx)
+    values = _masked(_as_series(ctx, x, "rank operand"), ctx)
     out = np.full(values.shape, np.nan)
     for t in range(values.shape[0]):
         row = values[t]
@@ -136,16 +175,15 @@ def op_rank(ctx: Context, x: np.ndarray) -> np.ndarray:
 
 def op_zscore(ctx: Context, x: np.ndarray) -> np.ndarray:
     """Cross-sectional standardisation per day."""
-    values = _masked(x, ctx)
-    mean = np.nanmean(values, axis=1, keepdims=True)
-    std = np.nanstd(values, axis=1, keepdims=True)
+    values = _masked(_as_series(ctx, x, "zscore operand"), ctx)
+    mean, std = _row_reduce(values, ctx.universe)
     with np.errstate(invalid="ignore", divide="ignore"):
         return _nan_to_nan((values - mean) / np.where(std > 0, std, np.nan))
 
 
 def op_scale(ctx: Context, x: np.ndarray, target: float = 1.0) -> np.ndarray:
     """Rescale each day so the absolute values sum to ``target``."""
-    values = _masked(x, ctx)
+    values = _masked(_as_series(ctx, x, "scale operand"), ctx)
     total = np.nansum(np.abs(values), axis=1, keepdims=True)
     with np.errstate(invalid="ignore", divide="ignore"):
         return _nan_to_nan(values * float(target) / np.where(total > 0, total, np.nan))
@@ -153,15 +191,16 @@ def op_scale(ctx: Context, x: np.ndarray, target: float = 1.0) -> np.ndarray:
 
 def op_winsorize(ctx: Context, x: np.ndarray, std: float = 4.0) -> np.ndarray:
     """Clip cross-sectional outliers at +/- ``std`` standard deviations."""
-    values = _masked(x, ctx)
-    mean = np.nanmean(values, axis=1, keepdims=True)
-    sigma = np.nanstd(values, axis=1, keepdims=True)
-    lo, hi = mean - float(std) * sigma, mean + float(std) * sigma
+    values = _masked(_as_series(ctx, x, "winsorize operand"), ctx)
+    mean, sigma = _row_reduce(values, ctx.universe)
+    limit = float(np.ravel(std)[0])
+    lo, hi = mean - limit * sigma, mean + limit * sigma
     return _nan_to_nan(np.clip(values, lo, hi))
 
 
 def _group_reduce(ctx: Context, x: np.ndarray, codes: np.ndarray, how: str) -> np.ndarray:
-    values = _masked(x, ctx)
+    values = _masked(_as_series(ctx, x, "group operand"), ctx)
+    codes = _as_series(ctx, codes, "group codes").astype(np.int64)
     out = np.full(values.shape, np.nan)
     for t in range(values.shape[0]):
         row, grp = values[t], codes[t]
@@ -209,6 +248,7 @@ def _group_codes(ctx: Context, group: np.ndarray) -> np.ndarray:
 # ------------------------------------------------------------ time series
 def op_ts_delay(ctx: Context, x: np.ndarray, d: int) -> np.ndarray:
     """Shift down by ``d`` rows, so row t holds the value from t-d."""
+    x = _as_series(ctx, x, 'ts_delay series')
     d = _as_lag(d)
     arr = np.asarray(x, dtype=float)
     if d == 0:
@@ -220,21 +260,25 @@ def op_ts_delay(ctx: Context, x: np.ndarray, d: int) -> np.ndarray:
 
 
 def op_ts_delta(ctx: Context, x: np.ndarray, d: int) -> np.ndarray:
+    x = _as_series(ctx, x, "ts_delta series")
     return _nan_to_nan(x - op_ts_delay(ctx, x, d))
 
 
 def op_ts_sum(ctx: Context, x: np.ndarray, d: int) -> np.ndarray:
+    x = _as_series(ctx, x, 'ts_sum series')
     total, count = _rolling_sum_count(x, _as_int(d))
     return np.where(count > 0, total, np.nan)
 
 
 def op_ts_mean(ctx: Context, x: np.ndarray, d: int) -> np.ndarray:
+    x = _as_series(ctx, x, 'ts_mean series')
     total, count = _rolling_sum_count(x, _as_int(d))
     with np.errstate(invalid="ignore", divide="ignore"):
         return np.where(count > 0, total / np.maximum(count, 1), np.nan)
 
 
 def op_ts_std_dev(ctx: Context, x: np.ndarray, d: int) -> np.ndarray:
+    x = _as_series(ctx, x, 'ts_std_dev series')
     d = _as_int(d)
     total, count = _rolling_sum_count(x, d)
     sq_total, _ = _rolling_sum_count(np.square(x), d)
@@ -246,22 +290,39 @@ def op_ts_std_dev(ctx: Context, x: np.ndarray, d: int) -> np.ndarray:
 
 def op_ts_zscore(ctx: Context, x: np.ndarray, d: int) -> np.ndarray:
     """Standardise against the instrument's own trailing window."""
+    x = _as_series(ctx, x, "ts_zscore series")
     mean = op_ts_mean(ctx, x, d)
     std = op_ts_std_dev(ctx, x, d)
     with np.errstate(invalid="ignore", divide="ignore"):
         return _nan_to_nan((x - mean) / np.where(std > 0, std, np.nan))
 
 
+def _window_extreme(w: np.ndarray, *, largest: bool) -> np.ndarray:
+    """Min/max over a window, returning NaN for an all-NaN window.
+
+    nanmin/nanmax warn on an all-NaN slice, which a warm-up row always is, so
+    the sentinel is substituted explicitly instead.
+    """
+    finite = np.isfinite(w)
+    sentinel = -np.inf if largest else np.inf
+    safe = np.where(finite, w, sentinel)
+    out = safe.max(axis=-1) if largest else safe.min(axis=-1)
+    return np.where(finite.any(axis=-1), out, np.nan)
+
+
 def op_ts_min(ctx: Context, x: np.ndarray, d: int) -> np.ndarray:
-    return _sliding(x, _as_int(d), lambda w: np.nanmin(w, axis=-1))
+    x = _as_series(ctx, x, 'ts_min series')
+    return _sliding(x, _as_int(d), lambda w: _window_extreme(w, largest=False))
 
 
 def op_ts_max(ctx: Context, x: np.ndarray, d: int) -> np.ndarray:
-    return _sliding(x, _as_int(d), lambda w: np.nanmax(w, axis=-1))
+    x = _as_series(ctx, x, 'ts_max series')
+    return _sliding(x, _as_int(d), lambda w: _window_extreme(w, largest=True))
 
 
 def op_ts_rank(ctx: Context, x: np.ndarray, d: int) -> np.ndarray:
     """Where the latest value sits in its own trailing window, in [0, 1]."""
+    x = _as_series(ctx, x, 'ts_rank series')
     def rank_last(w: np.ndarray) -> np.ndarray:
         current = w[..., -1]
         valid = np.isfinite(w)
@@ -275,6 +336,7 @@ def op_ts_rank(ctx: Context, x: np.ndarray, d: int) -> np.ndarray:
 
 
 def op_ts_argmax(ctx: Context, x: np.ndarray, d: int) -> np.ndarray:
+    x = _as_series(ctx, x, 'ts_argmax series')
     d = _as_int(d)
 
     def argmax(w: np.ndarray) -> np.ndarray:
@@ -287,6 +349,7 @@ def op_ts_argmax(ctx: Context, x: np.ndarray, d: int) -> np.ndarray:
 
 
 def op_ts_argmin(ctx: Context, x: np.ndarray, d: int) -> np.ndarray:
+    x = _as_series(ctx, x, 'ts_argmin series')
     d = _as_int(d)
 
     def argmin(w: np.ndarray) -> np.ndarray:
@@ -301,6 +364,8 @@ def op_ts_argmin(ctx: Context, x: np.ndarray, d: int) -> np.ndarray:
 def op_ts_corr(ctx: Context, x: np.ndarray, y: np.ndarray, d: int) -> np.ndarray:
     """Trailing Pearson correlation between two series, per instrument."""
     d = _as_int(d)
+    x = _as_series(ctx, x, "ts_corr series")
+    y = _as_series(ctx, y, "ts_corr series")
     both = np.isfinite(x) & np.isfinite(y)
     xm = np.where(both, x, np.nan)
     ym = np.where(both, y, np.nan)
@@ -328,6 +393,7 @@ def op_decay_linear(ctx: Context, x: np.ndarray, d: int) -> np.ndarray:
     lowers turnover: today's weights are blended with recent days'.
     """
     d = _as_int(d)
+    x = _as_series(ctx, x, "decay_linear series")
     weights = np.arange(d, 0, -1, dtype=float)      # d, d-1, ..., 1
     num = np.zeros_like(x, dtype=float)
     den = np.zeros_like(x, dtype=float)
