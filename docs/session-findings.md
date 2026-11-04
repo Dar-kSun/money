@@ -33,6 +33,28 @@ So screen on a subsample and confirm finalists on the full panel.
 **Offspring validity**: 400 consecutive mutations and crossovers all evaluated
 without a single rejection, after the node-selection fixes below.
 
+**Subsample screening preserves ranking.** Scoring the same 32 expressions on
+column subsets of one 1200-name panel (autocorr −0.30, so real signal is
+present):
+
+| Subsample | Spearman vs full panel | Top-5 overlap | Speedup |
+| --- | --- | --- | --- |
+| 250 names | +0.922 | 3/5 | 4.2× |
+| 500 names | +0.951 | 4/5 | 2.4× |
+
+So a narrow panel is a sound *coarse* filter — the ordering largely survives —
+but top-5 overlap of 3–4 out of 5 means it is not precise enough to pick the
+single best candidate. **Screen wide, then re-rank the finalists on the full
+panel before spending quota.**
+
+Two caveats on how this was measured, because the first attempt got it wrong.
+The subsets must be columns of *one* panel: comparing separately generated
+panels of different widths conflates "fewer names" with "different data", and
+on a weak-signal panel that comparison returned Spearman −0.62, which is
+noise being correlated against noise rather than evidence against
+subsampling. The panel also needs genuine signal, or there is no real ordering
+for the subsample to agree with.
+
 ## Mistakes worth not repeating
 
 **1. Over-generalising the −0.87 result.** The brief's finding that
@@ -85,11 +107,11 @@ on that optimisation is small.
    network policy here. The likely mismatch sites are the `is` summary keys in
    `simulate._finalize`, the submission paths in `submit.py`, and the
    `data-fields` query parameters.
-4. **A subsample-vs-full-panel ranking check was still running when the
-   session ended** and its result was never recorded. Worth redoing: it
-   decides how small a screening panel can safely be. Method: build panels at
-   250/500/2000 names, score the same expression set on each, and report the
-   Spearman correlation and top-10 overlap against the widest.
+4. **Re-rank screen finalists on the full panel.** The subsample result above
+   says the ordering survives but the top of it is not reliable to within a
+   place or two, so `run --screen` ideally re-scores its shortlist at full
+   width before choosing what to simulate. Not implemented; currently it
+   simulates the subsample's top N directly.
 5. **Record Brain's failed check names into the store.** The search currently
    cannot learn which regions get refused for correlation, so it may keep
    proposing them.
