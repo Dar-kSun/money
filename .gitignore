@@ -1,0 +1,17 @@
+# Credentials -- must never be committed
+.env
+
+# Run artifacts
+data/
+*.db
+*.db-wal
+*.db-shm
+successful_alphas.jsonl
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
