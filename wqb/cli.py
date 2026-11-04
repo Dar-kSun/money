@@ -52,6 +52,31 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("auth", help="verify credentials against the Brain API")
 
+    p_verify = sub.add_parser(
+        "verify", help="check the live API contract end to end, then calibrate"
+    )
+    p_verify.add_argument("--expression", default=None,
+                          help="expression to probe with (default: the blueprint)")
+    p_verify.add_argument("--no-simulate", action="store_true",
+                          help="check auth and data-fields only; spends no simulation")
+    p_verify.add_argument("--compare-local", action="store_true",
+                          help="also print local metrics beside Brain's")
+    p_verify.add_argument("--data", default="data/prices")
+    p_verify.add_argument("--fundamentals", default=None)
+    p_verify.add_argument("--synthetic", action="store_true")
+    p_verify.add_argument("--min-history", type=int, default=300)
+    p_verify.add_argument("--max-symbols", type=int, default=500)
+    p_verify.add_argument("--universe", type=int, default=3000)
+    p_verify.add_argument("--delay", type=int, default=1)
+    p_verify.add_argument("--decay", type=int, default=5)
+    p_verify.add_argument("--truncation", type=float, default=0.05)
+    p_verify.add_argument("--neutralization", default="SUBINDUSTRY")
+    p_verify.add_argument("--warmup", type=int, default=250)
+    p_verify.add_argument("--returns-basis", default="half_book",
+                          choices=("half_book", "book"))
+    p_verify.add_argument("--min-sharpe", type=float, default=1.25)
+    p_verify.add_argument("--min-fitness", type=float, default=1.0)
+
     p_tpl = sub.add_parser("templates", help="list the built-in alpha templates")
     p_tpl.add_argument("--expressions", action="store_true", help="show a rendered example")
 
@@ -167,6 +192,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "auth":
             print(f"Authentication successful (user={client.user_id or 'unknown'})")
             return 0
+        if args.command == "verify":
+            return cmd_verify(args, client)
         if args.command == "fields":
             return cmd_fields(args, client)
         if args.command == "simulate":
@@ -192,6 +219,31 @@ def cmd_templates(args: argparse.Namespace) -> int:
         if args.expressions:
             print(f"    e.g. {template.render('close', 20)}")
     return 0
+
+
+def cmd_verify(args: argparse.Namespace, client: BrainClient) -> int:
+    """Settle the API contract in one run, then seed calibration."""
+    from .verify import PROBE_EXPRESSION, compare_local, verify
+
+    expression = args.expression or PROBE_EXPRESSION
+    report = verify(
+        client=client,
+        expression=expression,
+        settings=settings_from_args(args),
+        skip_simulation=args.no_simulate,
+    )
+    print(report.render())
+
+    if args.compare_local and report.metrics:
+        from .localcli import load_panel, sim_config
+        try:
+            panel = load_panel(args)
+        except SystemExit as exc:
+            print(f"\nSkipping the local comparison: {exc}", file=sys.stderr)
+            return 0 if report.ok else 1
+        print(compare_local(expression, report.metrics, panel, sim_config(args)))
+
+    return 0 if report.ok else 1
 
 
 def cmd_fields(args: argparse.Namespace, client: BrainClient) -> int:
