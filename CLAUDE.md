@@ -120,6 +120,10 @@ python -m wqb search --data data/prices --fundamentals data/fundamentals --gener
 python -m wqb calibrate --data data/prices 'rank(-1 * ts_zscore(close, 20))'
 ```
 
+```bash
+pip install -r requirements-optional.txt   # only for `wqb propose`; needs ANTHROPIC_API_KEY
+```
+
 Add `--synthetic` to any of these to run on generated data without downloading
 anything; the results are not alphas and the command says so. See
 [`docs/data-sources.md`](docs/data-sources.md).

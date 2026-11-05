@@ -34,8 +34,15 @@ python -m wqb fetch prices --dest data/prices
 python -m wqb search --data data/prices
 ```
 
-Both are free. Only `auth`, `simulate`, `run`, `fields` and `submit` talk to
-Brain.
+Both are free. Only `auth`, `verify`, `simulate`, `run`, `fields` and `submit`
+talk to Brain.
+
+`python -m wqb propose` (Claude suggests alpha mechanisms) additionally needs an
+optional dependency and an Anthropic key — everything else works without both:
+
+```bash
+pip install -r requirements-optional.txt
+```
 
 ## Install
 
