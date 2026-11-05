@@ -152,3 +152,45 @@ def test_run_spends_no_quota_when_the_screen_empties_the_grid(monkeypatch, capsy
     assert cli.cmd_run(args, client=None, store=None) == 0
     assert not called, "run_batch must not be reached"
     assert "no quota spent" in capsys.readouterr().out
+
+
+# --------------------------------------------- malformed expressions
+def test_calibrate_stops_cleanly_on_an_unparseable_expression(capsys):
+    """A missing paren is a typo, not a crash. It used to warn and then raise
+    ExpressionError out of the command."""
+    code = run(["calibrate", "--synthetic", "--universe", "40", "--warmup", "80",
+                "ts_delta(close"])
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "parenthes" in err
+    assert "Traceback" not in err
+
+
+def test_calibrate_still_runs_a_soft_warning_through(capsys):
+    """Missing normalisation is worth warning about but is evaluable, so it
+    must not block calibration."""
+    code = run(["calibrate", "--synthetic", "--universe", "40", "--warmup", "80",
+                "ts_delta(close, 5)"])
+    assert code == 0
+    captured = capsys.readouterr()
+    assert "normalisation" in captured.err
+    assert "returns_basis=half_book" in captured.out
+
+
+def test_screen_survives_an_unknown_operator_in_a_template(capsys):
+    """Unevaluable candidates are counted and skipped, not fatal."""
+    code = run(["screen", "--synthetic", "--universe", "40", "--warmup", "80",
+                "--fields", "close", "--windows", "20"])
+    assert code == 0
+
+
+def test_no_local_command_tracebacks_on_a_bad_expression(capsys):
+    """Backstop: every local command exits with a message, never a traceback."""
+    for argv in (
+        ["calibrate", "--synthetic", "--universe", "40", "--warmup", "80", "rank(close"],
+        ["search", "--synthetic", "--universe", "40", "--warmup", "80",
+         "--population", "4", "--generations", "1", "--seeds", "rank(close"],
+    ):
+        code = run(argv)
+        assert code in (0, 1), argv
+        assert "Traceback" not in capsys.readouterr().err

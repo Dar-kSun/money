@@ -269,6 +269,10 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
     problems = validate_expression(args.expression)
     if problems:
         print("Expression has problems: " + "; ".join(problems), file=sys.stderr)
+        # An unbalanced expression cannot evaluate at all, so there is nothing
+        # to calibrate; the others are warnings worth simulating through.
+        if any("parenthes" in problem for problem in problems):
+            return 1
 
     panel = load_panel(args)
     _print_panel(panel)
@@ -276,7 +280,11 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
     for basis in ("half_book", "book"):
         config = sim_config(args)
         config = SimConfig(**{**config.__dict__, "returns_basis": basis})
-        metrics = simulate(args.expression, panel, config)
+        try:
+            metrics = simulate(args.expression, panel, config)
+        except ExpressionError as exc:
+            print(f"Cannot evaluate the expression: {exc}", file=sys.stderr)
+            return 1
         print(f"returns_basis={basis:10s} {metrics.summary()}")
 
     print(

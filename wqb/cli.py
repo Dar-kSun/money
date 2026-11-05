@@ -166,8 +166,13 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_templates(args)
     if args.command in LOCAL_HANDLERS:
         # Local commands run offline: no authentication, no quota.
+        from .local.evaluator import ExpressionError
         try:
             return LOCAL_HANDLERS[args.command](args)
+        except ExpressionError as exc:
+            # A typo in an expression is a user error, not a crash.
+            print(f"Expression error: {exc}", file=sys.stderr)
+            return 1
         except KeyboardInterrupt:
             return 130
 

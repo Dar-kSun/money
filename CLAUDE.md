@@ -71,6 +71,10 @@ python -m wqb auth
 ```
 
 ```bash
+python -m wqb verify --no-simulate   # check the live API contract, spends no simulation
+```
+
+```bash
 python -m wqb templates --expressions
 ```
 
@@ -80,6 +84,10 @@ python -m wqb run --dry-run --fields close volume returns --windows 5 10 20
 
 ```bash
 python -m wqb run --fields close volume returns vwap --windows 5 10 20 60 --concurrency 3
+```
+
+```bash
+python -m wqb run --screen --data data/prices --screen-top 20   # screen locally, simulate the best
 ```
 
 ```bash
@@ -223,21 +231,24 @@ against the live service** — the environment it was built in blocked
 `api.worldquantbrain.com`. Endpoint paths and response field names are therefore
 unconfirmed.
 
-Validate cheaply before any large run, in this order:
+`api.worldquantbrain.com` is denied at the *network layer* in that
+environment — the proxy refuses CONNECT with a 403, so no credential changes
+it; the host has to be allowed in the cloud environment's network settings.
+On your own machine there is no such restriction.
+
+One command runs every contract check and names which assumption broke:
 
 ```bash
-python -m wqb auth
+python -m wqb verify --no-simulate
 ```
 
 ```bash
-python -m wqb fields --limit 5
+python -m wqb verify --compare-local --data data/prices
 ```
 
-```bash
-python -m wqb simulate 'rank(-1 * ts_zscore(close, 20))'
-```
-
-If something is wrong it will surface here. Most likely spots:
+The first checks authentication and `data-fields` without spending a
+simulation. The second runs the full path and prints Brain's metrics beside the
+local simulator's. Most likely mismatch spots:
 
 * the in-sample summary key (`is`) and its metric names (`sharpe`, `fitness`,
   `turnover`), read in `simulate._finalize`
@@ -250,20 +261,31 @@ the **actual** payload — the mocked fixtures are only as good as their source.
 
 ## Extending
 
-**A new alpha template** — add a `Template` to `TEMPLATES` in `generate.py` with
-a one-line rationale. It must be mean-reverting and ranked; the
-`test_every_template_is_mean_reverting` test enforces this. Then
-`python -m wqb run --dry-run --templates <name>` to eyeball the rendered
-expressions before spending quota.
+**A new alpha template** — add a `Template` to `REVERSION_TEMPLATES` or
+`DRIFT_TEMPLATES` in `generate.py`, with a one-line rationale, a `Direction`,
+and the set of field classes it applies to. The invariant the tests enforce is
+that every template is **cross-sectionally normalised**
+(`test_every_template_is_cross_sectionally_normalised`) — *not* that it is
+mean-reverting. Two further tests check that price/volume only ever draw
+reversion templates and fundamental/analyst only drift. Then:
 
-**New data fields** — discover them with `python -m wqb fields --dataset <id>`
-and pass them to `run --fields`. The built-in `DEFAULT_FIELDS` list is only
-price/volume; fundamental datasets are where less-crowded alphas tend to be.
+```bash
+python -m wqb run --dry-run --templates <name>
+```
 
-**Operators used so far**: `rank`, `ts_mean`, `ts_zscore`, `ts_delta`, `ts_rank`,
-`ts_min`, `ts_max`, `ts_std_dev`, `decay_linear`, `group_neutralize`. Operator
-availability varies by region and delay — if a simulation returns an "unknown
-operator" error, that is the cause, not a syntax bug.
+**New data fields** — `python -m wqb fields --dataset <id>` lists them with
+coverage; `wqb/fields.py` ranks them by crowding. The built-in `DEFAULT_FIELDS`
+is only price/volume, which is the most mined region of the platform.
+Fundamental and analyst datasets are where uncorrelated alphas remain.
+
+**A new operator** — implement it in `wqb/local/operators.py` and register it in
+`OPERATORS`, or the local simulator cannot evaluate expressions that use it and
+the search will discard them. `wqb/propose.py` builds its operator list from
+that same registry, so a model is never told about an operator we cannot score.
+
+**Operator availability on Brain varies by region and delay.** If a *remote*
+simulation returns "unknown operator", that is the cause, not a syntax bug —
+and note it may be an operator the local simulator happily evaluates.
 
 ## Suggested next steps
 
