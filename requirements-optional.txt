@@ -1,0 +1,2 @@
+# The LLM proposer (python -m wqb propose) only. Everything else works without it.
+anthropic>=2.5

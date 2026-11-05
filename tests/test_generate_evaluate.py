@@ -1,13 +1,18 @@
 import pytest
 
 from wqb.evaluate import evaluate, failed_platform_checks
+from wqb.fields import Direction, FieldClass, FieldInfo
 from wqb.generate import (
     DEFAULT_FIELDS,
+    DRIFT_TEMPLATES,
+    REVERSION_TEMPLATES,
     TEMPLATES,
     generate,
     grid_size,
     looks_like_naive_momentum,
     resolve_templates,
+    templates_for,
+    validate_expression,
 )
 from wqb.simulate import SimulationResult
 
@@ -31,12 +36,29 @@ def test_blueprint_is_generated_first():
     assert blueprint in [c.expression for c in generate()]
 
 
-def test_every_template_is_mean_reverting():
-    """No template may reproduce the momentum form the spec rules out."""
+def test_every_template_is_cross_sectionally_normalised():
+    """The one universal invariant: positions must be market neutral."""
     for template in TEMPLATES:
         expr = template.render("close", 20)
-        assert not looks_like_naive_momentum(expr), template.name
-        assert "rank(" in expr, template.name
+        assert "rank(" in expr or "group_neutralize(" in expr, template.name
+        assert validate_expression(expr) == [], template.name
+
+
+def test_price_fields_only_draw_reversion_templates():
+    """The -0.87 lesson: price momentum must never be generated."""
+    for klass in (FieldClass.PRICE, FieldClass.VOLUME):
+        for template in templates_for(klass):
+            assert template.direction is Direction.REVERSION, (klass, template.name)
+
+
+def test_fundamental_and_analyst_only_draw_drift_templates():
+    """Drift is the documented effect on slow data (PEAD, revision momentum),
+    so forcing reversion there would rule out the least-crowded region."""
+    for klass in (FieldClass.FUNDAMENTAL, FieldClass.ANALYST):
+        pool = templates_for(klass)
+        assert pool, klass
+        for template in pool:
+            assert template.direction is Direction.DRIFT, (klass, template.name)
 
 
 def test_detects_the_documented_failure_mode():
@@ -44,15 +66,40 @@ def test_detects_the_documented_failure_mode():
     assert looks_like_naive_momentum("volume / ts_mean(volume, 5) - 1")
 
 
+def test_same_algebra_is_allowed_on_slow_data():
+    """The sign is a property of the data, not the formula: the expression that
+    fails on price is a legitimate drift signal on analyst revisions."""
+    assert not looks_like_naive_momentum(
+        "anl_eps_revision / ts_mean(anl_eps_revision, 60) - 1"
+    )
+    assert not looks_like_naive_momentum("total_assets / ts_mean(total_assets, 250) - 1")
+
+
 def test_does_not_flag_the_blueprint():
     assert not looks_like_naive_momentum("rank(-1 * (close / ts_mean(close, 20) - 1))")
     assert not looks_like_naive_momentum("-1 * (close / ts_mean(close, 20) - 1)")
 
 
+def test_windows_match_field_update_frequency():
+    """A 5-day window over quarterly accounting data samples noise."""
+    fundamental = FieldInfo(id="total_assets", dataset="fundamental6")
+    windows = {c.window for c in generate([fundamental])}
+    assert min(windows) >= 60, windows
+    price_windows = {c.window for c in generate(["close"])}
+    assert 5 in price_windows
+
+
 def test_grid_is_deduplicated_and_sized():
-    assert grid_size(["close"], [20], TEMPLATES[:1]) == 1
-    assert grid_size(["close", "close"], [20, 20], TEMPLATES[:1]) == 1
-    assert grid_size(DEFAULT_FIELDS, [5, 10], TEMPLATES) == len(DEFAULT_FIELDS) * 2 * len(TEMPLATES)
+    assert grid_size(["close"], [20], REVERSION_TEMPLATES[:1]) == 1
+    assert grid_size(["close", "close"], [20, 20], REVERSION_TEMPLATES[:1]) == 1
+    # Price fields draw only the reversion half of the template set.
+    assert grid_size(DEFAULT_FIELDS, [5, 10], TEMPLATES) == (
+        len(DEFAULT_FIELDS) * 2 * len(REVERSION_TEMPLATES)
+    )
+
+
+def test_drift_templates_are_not_offered_to_price_fields():
+    assert grid_size(["close"], [20], DRIFT_TEMPLATES) == 0
 
 
 def test_limit_caps_generation():
@@ -67,8 +114,9 @@ def test_resolve_templates_rejects_unknown_name():
 
 
 def test_candidate_tags():
-    candidate = next(generate(["close"], [20], TEMPLATES[:1]))
-    assert candidate.tags == ["auto", "reversion_ma", "close", "d20"]
+    candidate = next(generate(["close"], [20], REVERSION_TEMPLATES[:1]))
+    assert candidate.tags == ["template", "reversion_ma", "close", "d20"]
+    assert candidate.field_class is FieldClass.PRICE
 
 
 # ----------------------------------------------------------------- evaluation
